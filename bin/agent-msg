@@ -1,0 +1,401 @@
+#!/usr/bin/env node
+
+const { Command } = require('commander');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const program = new Command();
+
+const MSG_DIR = path.join(os.homedir(), '.agent-msg');
+const INBOX_DIR = path.join(MSG_DIR, 'inbox');
+const OUTBOX_DIR = path.join(MSG_DIR, 'outbox');
+const AGENTS_FILE = path.join(MSG_DIR, 'agents.json');
+
+function ensureDirs() {
+  [MSG_DIR, INBOX_DIR, OUTBOX_DIR].forEach(dir => {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  });
+  if (!fs.existsSync(AGENTS_FILE)) {
+    fs.writeFileSync(AGENTS_FILE, JSON.stringify({}, null, 2));
+  }
+}
+
+function loadAgents() {
+  try {
+    return JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveAgents(agents) {
+  fs.writeFileSync(AGENTS_FILE, JSON.stringify(agents, null, 2));
+}
+
+program
+  .name('agent-msg')
+  .description('Inter-agent communication utility')
+  .version('1.0.0');
+
+program
+  .command('register')
+  .description('Register this agent')
+  .argument('[name]', 'Agent name', os.hostname())
+  .option('-t, --type <type>', 'Agent type (claude-code, open-code, codex, openclaw, other)', 'other')
+  .action((name, options) => {
+    ensureDirs();
+    const agents = loadAgents();
+    agents[name] = {
+      name,
+      type: options.type,
+      registered: new Date().toISOString(),
+      inbox: path.join(INBOX_DIR, name),
+      outbox: path.join(OUTBOX_DIR, name)
+    };
+    [path.join(INBOX_DIR, name), path.join(OUTBOX_DIR, name)].forEach(dir => {
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    });
+    saveAgents(agents);
+    console.log(`✓ Registered agent: ${name} (${options.type})`);
+  });
+
+program
+  .command('list')
+  .description('List registered agents')
+  .action(() => {
+    ensureDirs();
+    const agents = loadAgents();
+    const names = Object.keys(agents);
+    if (names.length === 0) {
+      console.log('No agents registered. Run "agent-msg register <name>" first.');
+      return;
+    }
+    console.log('Registered agents:');
+    names.forEach(name => {
+      const agent = agents[name];
+      console.log(`  ${name} (${agent.type}) - registered ${agent.registered}`);
+    });
+  });
+
+program
+  .command('send')
+  .description('Send a message to an agent')
+  .argument('<to>', 'Recipient agent name')
+  .argument('<message>', 'Message to send')
+  .option('-f, --file', 'Use file-based messaging (default)')
+  .option('-w, --websocket', 'Use WebSocket messaging')
+  .option('-s, --from <name>', 'Sender agent name (default: hostname)')
+  .option('-u, --url <url>', 'WebSocket server URL', 'ws://127.0.0.1:18790')
+  .option('--wait', 'Wait for delivery confirmation (WebSocket only)')
+  .action((to, message, options) => {
+    ensureDirs();
+    const agents = loadAgents();
+    
+    const senderName = options.from || os.hostname();
+    const msgId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+    
+    if (options.websocket) {
+      const WebSocket = require('ws');
+      const ws = new WebSocket(options.url);
+      
+      console.log(`Sending to ${to} via WebSocket...`);
+      
+      ws.on('open', () => {
+        ws.send(JSON.stringify({ type: 'register', agent: senderName }));
+      });
+      
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data);
+          
+          if (msg.type === 'registered') {
+            ws.send(JSON.stringify({
+              type: 'message',
+              id: msgId,
+              from: senderName,
+              to,
+              message,
+              timestamp: new Date().toISOString()
+            }));
+          } else if (msg.type === 'delivered' && msg.id === msgId) {
+            console.log(`✓ Delivered to ${to}`);
+            ws.close();
+            process.exit(0);
+          } else if (msg.type === 'error') {
+            console.error(`✗ ${msg.error}`);
+            ws.close();
+            process.exit(1);
+          }
+        } catch (e) {}
+      });
+      
+      ws.on('error', (err) => {
+        console.error(`WebSocket error: ${err.message}`);
+        process.exit(1);
+      });
+      
+      if (!options.wait) {
+        setTimeout(() => ws.close(), 500);
+      }
+      return;
+    }
+
+    if (!agents[to]) {
+      console.error(`Error: Agent "${to}" not found. Run "agent-msg list" to see registered agents.`);
+      process.exit(1);
+    }
+
+    const msg = {
+      id: msgId,
+      from: senderName,
+      to,
+      message,
+      timestamp: new Date().toISOString(),
+      status: 'sent'
+    };
+
+    const inboxFile = path.join(INBOX_DIR, to, `${msg.id}.json`);
+    fs.writeFileSync(inboxFile, JSON.stringify(msg, null, 2));
+    console.log(`✓ Message sent to ${to} (${msg.id})`);
+  });
+
+program
+  .command('inbox')
+  .description('Check for new messages')
+  .argument('[agent]', 'Agent name to check (default: hostname)')
+  .option('-a, --all', 'Show all messages instead of just new ones')
+  .action((agent, options) => {
+    ensureDirs();
+    const agentName = agent || os.hostname();
+    const inboxPath = path.join(INBOX_DIR, agentName);
+    
+    if (!fs.existsSync(inboxPath)) {
+      console.log('No messages yet.');
+      return;
+    }
+
+    const files = fs.readdirSync(inboxPath).filter(f => f.endsWith('.json'));
+    if (files.length === 0) {
+      console.log('No messages.');
+      return;
+    }
+
+    files.forEach(file => {
+      const msg = JSON.parse(fs.readFileSync(path.join(inboxPath, file), 'utf8'));
+      console.log(`[${msg.from} at ${msg.timestamp}]: ${msg.message}`);
+      if (!options.all) {
+        fs.unlinkSync(path.join(inboxPath, file));
+      }
+    });
+
+    if (!options.all) {
+      console.log(`(Deleted ${files.length} message(s))`);
+    }
+  });
+
+program
+  .command('poll')
+  .description('Continuously poll for new messages')
+  .argument('[agent]', 'Agent name to check (default: hostname)')
+  .option('-i, --interval <ms>', 'Polling interval in ms', '2000')
+  .action((agent, options) => {
+    ensureDirs();
+    const agentName = agent || os.hostname();
+    const inboxPath = path.join(INBOX_DIR, agentName);
+    
+    console.log(`Polling for messages every ${options.interval}ms...`);
+    console.log('Press Ctrl+C to stop.\n');
+
+    const check = () => {
+      if (!fs.existsSync(inboxPath)) return;
+      
+      const files = fs.readdirSync(inboxPath).filter(f => f.endsWith('.json'));
+      files.forEach(file => {
+        const msg = JSON.parse(fs.readFileSync(path.join(inboxPath, file), 'utf8'));
+        console.log(`\n[${msg.from}]: ${msg.message}`);
+        fs.unlinkSync(path.join(inboxPath, file));
+      });
+    };
+
+    setInterval(check, parseInt(options.interval));
+    check();
+  });
+
+program
+  .command('server')
+  .description('Start WebSocket server for real-time messaging')
+  .option('-p, --port <port>', 'Port to listen on', '18790')
+  .action((options) => {
+    const WebSocket = require('ws');
+    const wss = new WebSocket.Server({ port: parseInt(options.port) });
+    
+    const clients = new Map();
+    
+    console.log(`WebSocket server running on port ${options.port}`);
+    
+    wss.on('connection', (ws) => {
+      let agentName = null;
+      
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data);
+          
+          switch (msg.type) {
+            case 'register':
+              agentName = msg.agent;
+              clients.set(agentName, ws);
+              console.log(`✓ Agent connected: ${agentName}`);
+              ws.send(JSON.stringify({ type: 'registered', agent: agentName }));
+              break;
+              
+            case 'message':
+              const targetWs = clients.get(msg.to);
+              if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+                targetWs.send(JSON.stringify({
+                  type: 'message',
+                  id: msg.id,
+                  from: msg.from,
+                  to: msg.to,
+                  message: msg.message,
+                  timestamp: msg.timestamp
+                }));
+                ws.send(JSON.stringify({ type: 'delivered', id: msg.id }));
+                console.log(`↔ ${msg.from} → ${msg.to}: ${msg.message.substring(0, 50)}...`);
+              } else {
+                ws.send(JSON.stringify({ type: 'error', id: msg.id, error: 'Agent not connected' }));
+                console.log(`✗ ${msg.from} → ${msg.to}: recipient not connected`);
+              }
+              break;
+              
+            case 'ping':
+              ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+              break;
+          }
+        } catch (e) {
+          console.error('Invalid message');
+        }
+      });
+      
+      ws.on('close', () => {
+        if (agentName) {
+          clients.delete(agentName);
+          console.log(`✗ Agent disconnected: ${agentName}`);
+        }
+      });
+    });
+  });
+
+program
+  .command('connect')
+  .description('Connect to WebSocket server for real-time messaging')
+  .option('-u, --url <url>', 'Server URL', 'ws://127.0.0.1:18790')
+  .option('-a, --agent <name>', 'Agent name', os.hostname())
+  .action((options) => {
+    const WebSocket = require('ws');
+    
+    console.log(`Connecting to ${options.url} as ${options.agent}...`);
+    
+    const ws = new WebSocket(options.url);
+    
+    ws.on('open', () => {
+      ws.send(JSON.stringify({ type: 'register', agent: options.agent }));
+    });
+    
+    ws.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data);
+        
+        switch (msg.type) {
+          case 'registered':
+            console.log(`✓ Connected as ${msg.agent}`);
+            console.log('Listening for messages...');
+            break;
+            
+          case 'message':
+            console.log(`\n[${msg.from}]: ${msg.message}`);
+            break;
+            
+          case 'delivered':
+            console.log(`✓ Message delivered`);
+            break;
+            
+          case 'error':
+            console.log(`✗ Error: ${msg.error}`);
+            break;
+        }
+      } catch (e) {}
+    });
+    
+    ws.on('close', () => {
+      console.log('Disconnected from server');
+    });
+    
+    ws.on('error', (err) => {
+      console.error(`Connection error: ${err.message}`);
+      process.exit(1);
+    });
+    
+    process.stdin.on('data', (chunk) => {
+      const input = chunk.toString().trim();
+      if (!input) return;
+      
+      const parts = input.split(' ');
+      const to = parts[0];
+      const message = parts.slice(1).join(' ');
+      
+      if (to && message) {
+        ws.send(JSON.stringify({
+          type: 'message',
+          id: Date.now().toString(36),
+          from: options.agent,
+          to,
+          message,
+          timestamp: new Date().toISOString()
+        }));
+      }
+    });
+  });
+
+program
+  .command('ping')
+  .description('Ping a registered agent via WebSocket')
+  .argument('<agent>', 'Agent name to ping')
+  .option('-u, --url <url>', 'Server URL', 'ws://127.0.0.1:18790')
+  .action((agent, options) => {
+    const WebSocket = require('ws');
+    
+    console.log(`Pinging ${agent} at ${options.url}...`);
+    
+    const ws = new WebSocket(options.url);
+    
+    ws.on('open', () => {
+      ws.send(JSON.stringify({ type: 'register', agent: 'ping-client' }));
+    });
+    
+    ws.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data);
+        
+        if (msg.type === 'registered') {
+          setTimeout(() => ws.close(), 1000);
+          console.log(`✓ Agent ${agent} is online (respon ded in<1s)`);
+        }
+      } catch (e) {}
+    });
+    
+    ws.on('error', () => {
+      console.log(`✗ Agent ${agent} is offline or server not running`);
+    });
+    
+    setTimeout(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
+        console.log(`✗ Agent ${agent} did not respond`);
+      }
+    }, 3000);
+  });
+
+program.parse();

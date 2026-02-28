@@ -1,0 +1,20 @@
+{
+  "name": "agent-msg",
+  "version": "1.0.0",
+  "description": "Inter-agent communication utility for AI agents (Claude Code, Open Code, Codex, OpenClaw)",
+  "main": "src/index.js",
+  "bin": {
+    "agent-msg": "./bin/agent-msg"
+  },
+  "scripts": {
+    "start": "node bin/agent-msg",
+    "test": "node test/index.js"
+  },
+  "keywords": ["ai", "agent", "communication", "claude", "opencode", "codex", "openclaw"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.19.0",
+    "commander": "^11.0.0"
+  }
+}
