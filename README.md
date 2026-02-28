@@ -2,6 +2,8 @@
 
 Inter-agent communication utility for AI agents (Claude Code, Open Code, Codex, OpenClaw). Enables agents to message each other without copy-pasting between CLI sessions.
 
+[Changelog](CHANGELOG.md)
+
 ## Why?
 
 When running multiple AI agents in separate terminal sessions, there's no built-in way for them to communicate. This utility provides a simple message passing system so agents can collaborate on tasks.
