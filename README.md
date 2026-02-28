@@ -218,9 +218,112 @@ agent-msg send opencode-agent "Can you run the tests?" -w --wait -u ws://YOUR_VP
 
 OpenCode on Machine A receives the message in real time.
 
-### Security note
+---
 
-Port 18790 is unauthenticated by default. For production use, consider placing the WebSocket server behind a reverse proxy (nginx, Caddy) with TLS and access controls.
+## Security & Authentication
+
+The WebSocket server has no built-in authentication. Choose an approach below based on your threat model.
+
+### Option 1: SSH Tunnel (simplest, recommended for personal use)
+
+Keep port 18790 closed to the public. Agents connect over an encrypted SSH tunnel instead.
+
+**On the VPS — bind the server to localhost only:**
+```bash
+agent-msg server  # listens on 127.0.0.1:18790 by default
+```
+
+Block external access:
+```bash
+sudo ufw deny 18790/tcp
+```
+
+**On each remote machine — open a tunnel before connecting:**
+```bash
+ssh -L 18790:127.0.0.1:18790 user@YOUR_VPS_IP -N &
+agent-msg connect -a my-agent -u ws://127.0.0.1:18790
+```
+
+All traffic is encrypted via SSH. No credentials are exposed over the network.
+
+---
+
+### Option 2: Reverse Proxy with TLS + Token Auth (recommended for teams)
+
+Place nginx in front of the WebSocket server with HTTPS and a shared secret header.
+
+**Install nginx and obtain a certificate (via Let's Encrypt):**
+```bash
+sudo apt install nginx certbot python3-certbot-nginx
+sudo certbot --nginx -d your-domain.com
+```
+
+**nginx config (`/etc/nginx/sites-available/agent-msg`):**
+```nginx
+server {
+    listen 443 ssl;
+    server_name your-domain.com;
+
+    ssl_certificate     /etc/letsencrypt/live/your-domain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
+
+    location /agent-msg {
+        # Require a shared secret token in the request header
+        if ($http_x_agent_token != "YOUR_SECRET_TOKEN") {
+            return 403;
+        }
+
+        proxy_pass http://127.0.0.1:18790;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/agent-msg /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+**Agents connect using the secure URL and token header:**
+```bash
+agent-msg connect -a my-agent -u wss://your-domain.com/agent-msg \
+  --header "x-agent-token: YOUR_SECRET_TOKEN"
+```
+
+Traffic is encrypted (WSS) and unauthenticated connections are rejected with 403.
+
+---
+
+### Option 3: IP Allowlist (simple for fixed-IP environments)
+
+If your agents always run from known IP addresses, restrict access at the firewall level.
+
+**ufw:**
+```bash
+sudo ufw deny 18790/tcp
+sudo ufw allow from AGENT_IP_1 to any port 18790
+sudo ufw allow from AGENT_IP_2 to any port 18790
+```
+
+**iptables:**
+```bash
+iptables -A INPUT -p tcp --dport 18790 -s AGENT_IP_1 -j ACCEPT
+iptables -A INPUT -p tcp --dport 18790 -s AGENT_IP_2 -j ACCEPT
+iptables -A INPUT -p tcp --dport 18790 -j DROP
+```
+
+---
+
+### Comparison
+
+| Approach | Encryption | Auth | Best for |
+|----------|-----------|------|----------|
+| SSH tunnel | ✓ (SSH) | ✓ (SSH keys) | Personal / solo use |
+| Reverse proxy + TLS | ✓ (TLS) | ✓ (token) | Teams / shared servers |
+| IP allowlist | ✗ | Partial (IP) | Fixed-IP private networks |
 
 ---
 
