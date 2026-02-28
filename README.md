@@ -28,6 +28,8 @@ npm link
 npm test
 ```
 
+See [TEST_RESULTS.md](TEST_RESULTS.md) for full test results including WebSocket and integration tests.
+
 ### Manual WebSocket Testing
 
 Test real-time messaging between agents:
