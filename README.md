@@ -109,6 +109,121 @@ Agent A should receive the message instantly.
 - `-s, --from <name>` - Sender agent name
 - `--wait` - Wait for delivery confirmation
 
+## Running on a VPS
+
+A VPS makes the WebSocket server accessible to agents running on different machines, enabling cross-device agent collaboration.
+
+### Prerequisites
+
+- Node.js v18+ and npm
+- A VPS with a public IP address
+- Port 18790 open (or your chosen port)
+
+### 1. Install agent-msg on the VPS
+
+```bash
+npm install -g agent-msg
+```
+
+### 2. Open the firewall port
+
+**ufw (Ubuntu/Debian):**
+```bash
+sudo ufw allow 18790/tcp
+```
+
+**firewalld (CentOS/RHEL):**
+```bash
+sudo firewall-cmd --permanent --add-port=18790/tcp
+sudo firewall-cmd --reload
+```
+
+**iptables:**
+```bash
+sudo iptables -A INPUT -p tcp --dport 18790 -j ACCEPT
+```
+
+### 3. Start the WebSocket server
+
+For a quick test:
+```bash
+agent-msg server
+```
+
+For persistent operation, use [PM2](https://pm2.keymetrics.io/):
+```bash
+npm install -g pm2
+pm2 start "agent-msg server" --name agent-msg-server
+pm2 save
+pm2 startup   # auto-start on reboot
+```
+
+Or run as a systemd service:
+```bash
+sudo tee /etc/systemd/system/agent-msg.service > /dev/null <<EOF
+[Unit]
+Description=agent-msg WebSocket Server
+After=network.target
+
+[Service]
+ExecStart=$(which agent-msg) server
+Restart=always
+User=$(whoami)
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now agent-msg
+```
+
+### 4. Connect agents remotely
+
+On each remote machine, install agent-msg and connect using the `-u` flag with your VPS IP or hostname:
+
+```bash
+npm install -g agent-msg
+
+agent-msg register my-agent -t claude-code
+agent-msg connect -a my-agent -u ws://YOUR_VPS_IP:18790
+```
+
+### 5. Send messages across machines
+
+With agents connected from different machines, sending works the same way — just add `-u` to target the remote server:
+
+```bash
+agent-msg send other-agent "Hello from a different machine!" -w --wait -u ws://YOUR_VPS_IP:18790
+```
+
+### Example: Claude Code on one machine, OpenCode on another
+
+**VPS — start the server:**
+```bash
+agent-msg server
+```
+
+**Machine A (OpenCode):**
+```bash
+agent-msg register opencode-agent -t open-code
+agent-msg connect -a opencode-agent -u ws://YOUR_VPS_IP:18790
+```
+
+**Machine B (Claude Code):**
+```bash
+agent-msg register claude-code-agent -t claude-code
+agent-msg send opencode-agent "Can you run the tests?" -w --wait -u ws://YOUR_VPS_IP:18790
+```
+
+OpenCode on Machine A receives the message in real time.
+
+### Security note
+
+Port 18790 is unauthenticated by default. For production use, consider placing the WebSocket server behind a reverse proxy (nginx, Caddy) with TLS and access controls.
+
+---
+
 ## Programmatic Usage
 
 ```javascript
